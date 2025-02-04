@@ -117,6 +117,13 @@ class PokerAssistant:
 
         self.evaluator = Evaluator()  # 创建评估器
 
+        # 添加决策相关的属性
+        self.active_players = set()  # 当前还在参与的玩家
+        self.current_bet = 0  # 当前最大下注额
+        self.total_pot = 0  # 总底池
+        self.last_action = {}  # 记录每个位置的最后一个动作
+        self.position_bets = {}  # 记录每个位置的下注额
+
         self.setup_gui()
 
     def setup_gui(self):
@@ -180,16 +187,16 @@ class PokerAssistant:
         table_frame = tk.Frame(left_frame)
         table_frame.pack(expand=True, fill=tk.BOTH)
 
-        # 创建Canvas
-        self.table_canvas = tk.Canvas(table_frame, width=800, height=600, bg='#1a472a')  # 增加画布高度
+        # 创建Canvas - 增加高度，给底部留出更多空间
+        self.table_canvas = tk.Canvas(table_frame, width=800, height=700, bg='#1a472a')  # 增加画布高度到700
         self.table_canvas.pack(expand=True)
 
-        # 画椭圆形牌桌
-        self.table_canvas.create_oval(50, 50, 750, 550, fill='#2d5a3f', outline='#1e5631', width=3)  # 调整椭圆大小
+        # 画椭圆形牌桌 - 向上移动一些，给底部留出更多空间
+        self.table_canvas.create_oval(50, 50, 750, 600, fill='#2d5a3f', outline='#1e5631', width=3)  # 调整椭圆底部位置到600
 
-        # 在中间显示公共牌区域
+        # 在中间显示公共牌区域 - 相应调整垂直位置
         community_frame = tk.LabelFrame(self.table_canvas, text="公共牌", font=self.title_font)
-        self.table_canvas.create_window(400, 300, window=community_frame)
+        self.table_canvas.create_window(400, 325, window=community_frame)  # 调整垂直位置到325
         
         # 添加公共牌输入框
         self.community_entry = tk.Entry(community_frame, width=20, font=self.default_font)
@@ -202,6 +209,9 @@ class PokerAssistant:
 
         # 创建玩家位置框架
         self.frame_windows = {}  # 存储canvas window的ID
+        total_positions = len(self.player_positions)
+        angle_step = 360 / total_positions  # 动态计算角度间隔
+
         for pos in self.player_positions:
             player_frame = tk.Frame(self.table_canvas)
             self.player_frames[pos] = player_frame
@@ -262,8 +272,41 @@ class PokerAssistant:
             raise_entry = tk.Entry(action_frame, width=8, font=self.default_font)
             self.raise_entries[pos] = raise_entry
 
-            # 创建window，但先不指定位置
-            window_id = self.table_canvas.create_window(0, 0, window=player_frame)
+            # 创建window，设置初始位置
+            pos_number = self.position_to_number[pos]
+            # 计算角度，确保均匀分布
+            angle = math.radians(270 - (pos_number-1)*angle_step)
+            
+            # 基础半径和偏移量
+            base_radius = 250
+            x_offset = 0
+            y_offset = 0
+            
+            # 根据位置调整半径和偏移
+            angle_deg = math.degrees(angle) % 360
+            if 0 <= angle_deg < 45 or 315 <= angle_deg < 360:  # 下方
+                anchor = tk.N
+                y_offset = 50
+                adjusted_radius = base_radius
+            elif 45 <= angle_deg < 135:  # 右侧
+                anchor = tk.W
+                x_offset = 60
+                adjusted_radius = base_radius * 1.1
+            elif 135 <= angle_deg < 225:  # 上方
+                anchor = tk.S
+                y_offset = -50
+                adjusted_radius = base_radius * 1.2
+            elif 225 <= angle_deg < 315:  # 左侧
+                anchor = tk.E
+                x_offset = -60
+                adjusted_radius = base_radius * 1.1
+
+            # 计算最终位置
+            x = 400 + adjusted_radius * math.cos(angle) + x_offset
+            y = 325 + adjusted_radius * math.sin(angle) + y_offset
+
+            # 创建window
+            window_id = self.table_canvas.create_window(x, y, window=player_frame, anchor=anchor)
             self.frame_windows[pos] = window_id
 
         # 初始化位置
@@ -318,6 +361,8 @@ class PokerAssistant:
                   command=self.reset_game, font=self.default_font).pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="下一级盲注",
                   command=self.increase_blind_level, font=self.default_font).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="决策分析",
+                 command=self.analyze_decision, font=self.default_font).pack(side=tk.LEFT, padx=5)
 
         # 添加分析结果显示区域
         result_frame = tk.LabelFrame(right_frame, text="分析结果", font=self.title_font)
@@ -360,17 +405,18 @@ class PokerAssistant:
                               f"前注: {current_blind[2]:,}")
 
     def get_position_strength(self, position):
-        """获取位置强度评分（1-10）"""
+        """评估位置优势"""
+        # 位置优势评分（0-10）
         position_scores = {
-            '大盲位(BB)': 3,
-            '枪口位(UTG)': 5,
-            '枪口+1(UTG+1)': 5,
-            '枪口+2(UTG+2)': 6,
-            '中间位(MP)': 7,
-            '中间位+1(MP+1)': 8,
-            '切位(CO)': 10,
-            '庄家位(BTN)': 9,
-            '小盲位(SB)': 4
+            '庄家位(BTN)': 10,    # 最强位置
+            '切位(CO)': 9,        # 次强位置
+            '中间位+1(MP+1)': 7,
+            '中间位(MP)': 6,
+            '枪口+2(UTG+2)': 5,
+            '枪口+1(UTG+1)': 4,
+            '枪口位(UTG)': 3,
+            '小盲位(SB)': 2,      # 位置差
+            '大盲位(BB)': 1       # 最差位置
         }
         return position_scores.get(position, 5)
 
@@ -410,32 +456,63 @@ class PokerAssistant:
     def update_positions(self):
         """更新玩家位置在牌桌上的布局（圆形布局）"""
         positions = list(self.position_numbers.keys())
-        center_x, center_y = 400, 300  # 牌桌中心坐标
-        radius = 250  # 布局半径
+        center_x, center_y = 400, 325  # 中心点位置
+        base_radius = 250  # 增加基础半径
         angle_step = 360 / len(positions)
 
-        # 根据当前用户位置调整起始角度（让用户位置在底部）
+        # 根据当前用户位置调整起始角度
         my_pos_number = self.position_to_number[self.my_position]
         start_angle = 270 - (my_pos_number-1)*angle_step
+
+        # 计算每个位置的实际大小
+        frame_sizes = {}
+        for pos in self.player_positions:
+            frame = self.player_frames[pos]
+            frame.update()  # 确保尺寸更新
+            frame_sizes[pos] = (frame.winfo_width(), frame.winfo_height())
 
         for pos_name in self.player_positions:
             pos_number = self.position_to_number[pos_name]
             # 计算角度（逆时针布局）
             angle = math.radians(start_angle + (pos_number-1)*angle_step)
-            x = center_x + radius * math.cos(angle)
-            y = center_y + radius * math.sin(angle)
+            angle_deg = math.degrees(angle) % 360
 
-            # 调整位置框的锚点方向
-            if 135 < angle < 225:
-                anchor = tk.S
-            elif 225 <= angle < 315:
-                anchor = tk.W
-            else:
+            # 获取当前框架的大小
+            width, height = frame_sizes[pos_name]
+            
+            # 根据框架大小调整半径和偏移量
+            adjusted_radius = base_radius
+            x_offset = 0
+            y_offset = 0
+
+            # 根据位置调整
+            if 0 <= angle_deg < 45 or 315 <= angle_deg < 360:  # 下方
                 anchor = tk.N
+                y_offset = height/2 + 50
+                adjusted_radius *= 1.0
+            elif 45 <= angle_deg < 135:  # 右侧
+                anchor = tk.W
+                x_offset = width/2 + 60
+                adjusted_radius *= 1.1
+            elif 135 <= angle_deg < 225:  # 上方
+                anchor = tk.S
+                y_offset = -height/2 - 50
+                adjusted_radius *= 1.2
+            elif 225 <= angle_deg < 315:  # 左侧
+                anchor = tk.E
+                x_offset = -width/2 - 60
+                adjusted_radius *= 1.1
+
+            # 计算最终位置，考虑框架大小
+            x = center_x + adjusted_radius * math.cos(angle) + x_offset
+            y = center_y + adjusted_radius * math.sin(angle) + y_offset
 
             # 更新Canvas窗口位置
             self.table_canvas.coords(self.frame_windows[pos_name], x, y)
             self.table_canvas.itemconfigure(self.frame_windows[pos_name], anchor=anchor)
+
+            # 确保框架在最上层显示
+            self.table_canvas.tag_raise(self.frame_windows[pos_name])
 
     def start_new_round(self):
         """开始新一轮游戏"""
@@ -660,6 +737,220 @@ class PokerAssistant:
                 if card not in exclude:
                     deck.append(card)
         return deck
+
+    def analyze_decision(self):
+        """分析当前局势并给出决策建议"""
+        try:
+            # 获取当前玩家手牌
+            my_cards_str = self.my_cards_entry.get().strip()
+            if not my_cards_str or len(my_cards_str) != 4:
+                raise ValueError("请先输入您的手牌")
+
+            # 获取公共牌
+            community_str = self.community_entry.get().strip()
+            
+            # 解析手牌和公共牌
+            my_cards = [Card.new(my_cards_str[i:i+2]) for i in range(0, 4, 2)]
+            community_cards = [Card.new(community_str[i:i+2]) for i in range(0, len(community_str), 2)] if community_str else []
+
+            # 收集对手行动信息
+            active_opponents = []
+            aggressive_actions = 0  # 记录加注次数
+            for pos in self.player_positions:
+                if pos != self.my_position:
+                    action = self.player_actions[pos].get()
+                    if action != "弃牌":
+                        active_opponents.append(pos)
+                        if action in ["加注", "allin"]:
+                            aggressive_actions += 1
+
+            # 计算当前胜率
+            win_rate = self.calculate_win_rate(my_cards, community_cards, len(active_opponents))
+
+            # 获取位置强度
+            position_strength = self.get_position_strength(self.my_position)
+
+            # 计算底池赔率
+            pot_size = float(self.pot_entry.get() or 0)
+            current_bet = max(float(entry.get() or 0) for entry in self.raise_entries.values() if entry.get())
+            pot_odds = current_bet / (pot_size + current_bet) if current_bet > 0 else 0
+
+            # 生成决策建议
+            self.analysis_text.insert(tk.END, "\n=== 决策分析 ===\n")
+            self.analysis_text.insert(tk.END, f"当前阶段: {self.current_stage}\n")
+            self.analysis_text.insert(tk.END, f"手牌: {my_cards_str}\n")
+            self.analysis_text.insert(tk.END, f"位置: {self.my_position}\n")
+            self.analysis_text.insert(tk.END, f"胜率: {win_rate:.1f}%\n")
+            self.analysis_text.insert(tk.END, f"还在参与的玩家数: {len(active_opponents)}\n")
+            self.analysis_text.insert(tk.END, f"底池赔率: {pot_odds:.2f}\n")
+
+            # 根据不同情况给出建议
+            recommendation = self.get_decision_recommendation(
+                win_rate, position_strength, pot_odds, 
+                len(active_opponents), aggressive_actions, 
+                self.current_stage
+            )
+
+            self.analysis_text.insert(tk.END, f"\n决策建议: {recommendation}\n")
+            self.analysis_text.insert(tk.END, f"{'-'*30}\n")
+            self.analysis_text.see(tk.END)
+
+        except Exception as e:
+            messagebox.showerror("分析错误", str(e))
+
+    def calculate_win_rate(self, my_cards, community_cards, active_opponents):
+        """计算当前胜率"""
+        # 使用现有的calculate_odds逻辑，但返回胜率值
+        deck = self._generate_deck(my_cards + community_cards)
+        iterations = 1000
+        win_count = 0
+
+        for _ in range(iterations):
+            random.shuffle(deck)
+            remaining_comm = []
+            
+            # 根据当前阶段补齐公共牌
+            if self.current_stage == '底牌':
+                remaining_comm = deck[:5]
+            elif self.current_stage == '翻牌':
+                remaining_comm = community_cards + deck[:2]
+            elif self.current_stage == '转牌':
+                remaining_comm = community_cards + [deck[0]]
+            else:  # 河牌
+                remaining_comm = community_cards
+
+            # 模拟对手手牌
+            opponent_wins = 0
+            for _ in range(active_opponents):
+                opp_cards = deck[5:7]  # 使用剩余牌堆中的牌
+                opp_rank = self.evaluator.evaluate(remaining_comm, opp_cards)
+                my_rank = self.evaluator.evaluate(remaining_comm, my_cards)
+                if my_rank < opp_rank:
+                    opponent_wins += 1
+
+            if opponent_wins == 0:
+                win_count += 1
+            elif opponent_wins == active_opponents:
+                continue
+            else:
+                win_count += 0.5  # 平分底池情况
+
+        return win_count / iterations * 100
+
+    def get_preflop_hand_strength(self, cards_str):
+        """评估翻牌前手牌强度"""
+        # 解析手牌
+        card1, card2 = cards_str[:2], cards_str[2:]
+        rank1, suit1 = card1[0], card1[1]
+        rank2, suit2 = card2[0], card2[1]
+        suited = suit1 == suit2
+        
+        # 牌值映射
+        rank_map = {'2':2, '3':3, '4':4, '5':5, '6':6, '7':7, '8':8, '9':9, 'T':10, 'J':11, 'Q':12, 'K':13, 'A':14}
+        r1, r2 = rank_map[rank1], rank_map[rank2]
+        high_rank, low_rank = max(r1, r2), min(r1, r2)
+        
+        # 基础分值（0-10）
+        if r1 == r2:  # 对子
+            return min(10, 5 + high_rank/2)  # AA=12, 22=6
+        elif suited:  # 同花
+            gap = high_rank - low_rank - 1
+            return min(8, max(0, 4 + (high_rank/3) - gap/2))
+        else:  # 杂色
+            gap = high_rank - low_rank - 1
+            return min(7, max(0, 3 + (high_rank/3) - gap/2))
+
+    def get_decision_recommendation(self, win_rate, position_strength, pot_odds, 
+                                  active_opponents, aggressive_actions, stage):
+        """根据各种因素给出决策建议"""
+        try:
+            # 获取手牌
+            my_cards_str = self.my_cards_entry.get().strip()
+            
+            # 计算筹码深度
+            my_chips = float(self.player_chips[self.my_position].get())
+            big_blind = self.tournament.blind_levels[self.current_level][1]
+            stack_depth = my_chips / big_blind
+            
+            # 计算底池优势
+            pot_size = float(self.pot_entry.get() or 0)
+            current_bet = max(float(entry.get() or 0) for entry in self.raise_entries.values() if entry.get())
+            
+            if stage == '底牌':
+                # 获取翻牌前手牌强度（0-10分）
+                hand_strength = self.get_preflop_hand_strength(my_cards_str)
+                
+                # 基础评分（考虑更多因素）
+                base_score = (
+                    hand_strength * 0.4 +      # 手牌强度权重
+                    position_strength * 0.3 +   # 位置权重
+                    (10 - active_opponents) * 0.2 +  # 参与人数权重
+                    (10 - aggressive_actions) * 0.1   # 激进行动权重
+                )
+                
+                # 翻牌前策略
+                if stack_depth < 15:  # 短筹码策略
+                    if hand_strength > 8:  # 强牌（AA, KK, QQ, AK等）
+                        return "All-in"
+                    elif hand_strength > 6 and position_strength > 7:  # 中强牌在好位置
+                        return "小注加注（2-3BB），有人加注则All-in"
+                    else:
+                        return "弃牌"
+                else:  # 深筹码策略
+                    if hand_strength > 8:  # 超强牌
+                        return f"加注 3BB，有人3bet可以4bet"
+                    elif hand_strength > 6:  # 强牌
+                        return "加注 2.5BB，有人3bet则弃牌"
+                    elif hand_strength > 4 and position_strength > 8:  # 中等牌在好位置
+                        return "偷盲加注 2BB，有人3bet则弃牌"
+                    elif self.my_position == '大盲位(BB)' and current_bet <= big_blind:
+                        return "免费看翻牌"
+                    else:
+                        return "弃牌"
+            else:
+                # 翻牌后策略
+                if win_rate > 80:  # 超强牌力
+                    if aggressive_actions > 0:
+                        return "加注底池1-1.5倍或All-in"
+                    else:
+                        return "价值加注底池2/3"
+                elif win_rate > 60:  # 强牌
+                    if pot_odds < win_rate/100:
+                        if aggressive_actions > 1:
+                            return "谨慎跟注，考虑弃牌"
+                        else:
+                            return "加注底池1/2到2/3"
+                    else:
+                        return "跟注"
+                elif win_rate > 40:  # 中等牌力
+                    if pot_odds < win_rate/150:  # 更严格的底池赔率要求
+                        if position_strength > 7:
+                            return "尝试偷池，加注底池1/3"
+                        else:
+                            return "跟注一轮，后续行动需谨慎"
+                    else:
+                        return "弃牌"
+                else:  # 弱牌
+                    if position_strength > 8 and aggressive_actions == 0:
+                        return "可以尝试诈唬，加注底池1/2"
+                    else:
+                        return "弃牌"
+
+            # 特殊情况建议
+            recommendation = []
+            if aggressive_actions > 1:
+                recommendation.append("警告：多人加注，建议保守行动")
+            if active_opponents > 3:
+                recommendation.append("警告：多人底池，胜率显著降低")
+            if stack_depth < 15:
+                recommendation.append("警告：筹码较短，需要寻找All-in机会")
+            if stage != '底牌' and win_rate > 70 and pot_size > my_chips * 0.3:
+                recommendation.append("提示：考虑全押以最大化价值")
+            
+            return "\n".join(recommendation) if recommendation else "弃牌"
+
+        except Exception as e:
+            return "分析错误，请检查输入"
 
 if __name__ == "__main__":
     app = PokerAssistant()
